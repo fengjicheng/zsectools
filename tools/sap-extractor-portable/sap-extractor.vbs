@@ -279,171 +279,182 @@ WScript.Quit RunSupervisor()
 Function RunSupervisor()
     Dim envP, answer, statsPeriod, statsDate, statDateYmd, statsFile
     Dim runNo, failedRuns, everConnected, pendingBefore, pendingAfter, code, missing, res
+    Dim restartAnswer
 
-    res = EXIT_DONE
-    RunSupervisor = EXIT_DONE
-    Set envP = shell.Environment("PROCESS")
-
-    If Not fso.FileExists(TABLES_FILE) Then
-        WScript.Echo "Error: file tables.txt not found!"
-        RunSupervisor = EXIT_CONFIG
-        Exit Function
-    End If
-    If Not fso.FolderExists(OUTPUT_FOLDER) Then
-        fso.CreateFolder(OUTPUT_FOLDER)
-    End If
-
-    ' Remove leftovers of interrupted runs (old per-batch temp files, stats
-    ' temp file of a crashed statistics download, failed-tables memory)
-    On Error Resume Next
-    fso.DeleteFile OUTPUT_FOLDER & "~batch_*.tmp", True
-    fso.DeleteFile OUTPUT_FOLDER & "~stats_*.tmp", True
-    fso.DeleteFile OUTPUT_FOLDER & "~failed.lst", True
-    On Error GoTo 0
-
-    WScript.Echo "=== zsectools portable SAP extractor ==="
-    If SAP_SSO Then
-        WScript.Echo "Target: " & SAP_SYSTEM & " (client " & SAP_CLIENT & ", SSO logon entry: " & SAP_LOGON_ENTRY & ")"
-    Else
-        WScript.Echo "Target: " & SAP_SYSTEM & " (" & SAP_ASHOST & ":" & SAP_SYSNR & ", client " & SAP_CLIENT & ")"
-    End If
-    WScript.Echo ""
-
-    ' Credentials: asked ONCE here, handed to the worker processes through
-    ' their environment (not on the command line, never written to disk).
-    ' SSO/SNC mode (v9): nothing is asked, the SAP Logon entry authenticates
-    If Not SAP_SSO Then
-        If Trim(SAP_USER) = "" Then
-            WScript.StdOut.Write "Step 0a - SAP user: "
-            SAP_USER = Trim(WScript.StdIn.ReadLine)
-        End If
-        If Trim(SAP_PASSWORD) = "" Then
-            WScript.StdOut.Write "Step 0b - SAP password: "
-            SAP_PASSWORD = WScript.StdIn.ReadLine
-        End If
-        envP("ZSEC_SAP_USER") = SAP_USER
-        envP("ZSEC_SAP_PASSWORD") = SAP_PASSWORD
-    Else
-        WScript.Echo "SSO mode: no user / password requested (logon entry: " & SAP_LOGON_ENTRY & ")"
-    End If
-
-    ' Optional user statistics (prompted once, executed by the first worker)
-    envP("ZSEC_STATS") = ""
-    statsFile = ""
-    WScript.StdOut.Write "Step 1 - Do you also want to extract user statistics? (y/n): "
-    answer = LCase(Trim(WScript.StdIn.ReadLine))
-    If answer = "y" Or answer = "yes" Then
-        Do
-            WScript.StdOut.Write "Step 2 - Period type (m=month, w=week, d=day): "
-            statsPeriod = UCase(Trim(WScript.StdIn.ReadLine))
-        Loop While statsPeriod <> "M" And statsPeriod <> "W" And statsPeriod <> "D"
-        Do
-            WScript.StdOut.Write "Step 3 - Date in YYYYMMDD format (e.g. 20260528): "
-            statsDate = Trim(WScript.StdIn.ReadLine)
-        Loop While ConvertSapDate(statsDate) = ""
-        ' The SWNC collector stores the aggregates keyed by the FIRST day of the
-        ' period: M -> 1st day of the month, W -> Monday of that week, D -> the
-        ' date itself. Snap the typed date to that key so the RFC finds the record.
-        statDateYmd = GetPeriodStart(statsPeriod, statsDate)
-        If statDateYmd <> statsDate Then
-            WScript.Echo "  -> " & statsPeriod & " aggregates are keyed by period start: using " & statDateYmd
-        End If
-        envP("ZSEC_STATS") = statsPeriod & "|" & statDateYmd
-        statsFile = StatsFileName(statsPeriod, statDateYmd)
-    End If
-    WScript.Echo ""
-
-    ' SKIP_EXISTING = False means "redo everything": delete the old exports
-    ' ONCE, here. The workers always resume (skip existing files), otherwise
-    ' every relaunch would restart from the first table.
-    If Not SKIP_EXISTING Then DeleteExistingExports statsFile
-
-    LogEvent "session start: " & SAP_SYSTEM & " client " & SAP_CLIENT & ", tables to export: " & CountPending()
-
-    runNo = 0
-    failedRuns = 0
-    everConnected = False
     Do
-        runNo = runNo + 1
-        If runNo > MAX_LAUNCHES Then
-            WScript.Echo "Too many restarts (" & MAX_LAUNCHES & "): stopping."
-            res = EXIT_CRASH
-            Exit Do
+        res = EXIT_DONE
+        RunSupervisor = EXIT_DONE
+        Set envP = shell.Environment("PROCESS")
+
+        If Not fso.FileExists(TABLES_FILE) Then
+            WScript.Echo "Error: file tables.txt not found!"
+            RunSupervisor = EXIT_CONFIG
+            Exit Function
         End If
-        pendingBefore = CountPending()
-        LogEvent "launch " & runNo & " (tables still to export: " & pendingBefore & ")"
-        code = RunWorkerProcess()
-        pendingAfter = CountPending()
-        LogEvent "worker " & runNo & " ended with exit code " & code & " (tables still to export: " & pendingAfter & ")"
-
-        If code = EXIT_DONE Then Exit Do
-
-        If code <> EXIT_LOGON And code <> EXIT_CONFIG Then
-            everConnected = True
-            envP("ZSEC_STATS") = ""     ' the statistics step has been attempted: never again
+        If Not fso.FolderExists(OUTPUT_FOLDER) Then
+            fso.CreateFolder(OUTPUT_FOLDER)
         End If
 
-        If code = EXIT_CONFIG Then
-            WScript.Echo ""
-            WScript.Echo "Configuration problem: not retrying (see the message above and README.md)."
-            res = EXIT_CONFIG
-            Exit Do
-        End If
-        If code = EXIT_LOGON And Not everConnected Then
-            WScript.Echo ""
-            WScript.Echo "SAP logon failed: NOT retrying automatically (a wrong password could lock the SAP user)."
-            WScript.Echo "Check user / password / host / client / SAProuter and start again."
-            res = EXIT_LOGON
-            Exit Do
-        End If
+        ' Remove leftovers of interrupted runs (old per-batch temp files, stats
+        ' temp file of a crashed statistics download, failed-tables memory)
+        On Error Resume Next
+        fso.DeleteFile OUTPUT_FOLDER & "~batch_*.tmp", True
+        fso.DeleteFile OUTPUT_FOLDER & "~stats_*.tmp", True
+        fso.DeleteFile OUTPUT_FOLDER & "~failed.lst", True
+        On Error GoTo 0
 
-        If code = EXIT_BUDGET Then
-            failedRuns = 0
-            WScript.Echo ""
-            WScript.Echo "--- planned restart (fresh process = fresh memory), " & pendingAfter & " table(s) to go ---"
-            WScript.Echo ""
+        WScript.Echo "=== zsectools portable SAP extractor ==="
+        If SAP_SSO Then
+            WScript.Echo "Target: " & SAP_SYSTEM & " (client " & SAP_CLIENT & ", SSO logon entry: " & SAP_LOGON_ENTRY & ")"
         Else
-            If pendingAfter < pendingBefore Then
-                failedRuns = 0
-            Else
-                failedRuns = failedRuns + 1
+            WScript.Echo "Target: " & SAP_SYSTEM & " (" & SAP_ASHOST & ":" & SAP_SYSNR & ", client " & SAP_CLIENT & ")"
+        End If
+        WScript.Echo ""
+
+        ' Credentials: asked ONCE here, handed to the worker processes through
+        ' their environment (not on the command line, never written to disk).
+        ' SSO/SNC mode (v9): nothing is asked, the SAP Logon entry authenticates
+        If Not SAP_SSO Then
+            If Trim(SAP_USER) = "" Then
+                WScript.StdOut.Write "Step 0a - SAP user: "
+                SAP_USER = Trim(WScript.StdIn.ReadLine)
             End If
-            If failedRuns >= MAX_FAILED_RESTARTS Then
-                WScript.Echo ""
-                WScript.Echo "The extractor stopped abnormally " & failedRuns & " times in a row without completing any new table:"
-                WScript.Echo "giving up. Details in sap-extractor.log. Run the .bat again to resume."
+            If Trim(SAP_PASSWORD) = "" Then
+                WScript.StdOut.Write "Step 0b - SAP password: "
+                SAP_PASSWORD = WScript.StdIn.ReadLine
+            End If
+            envP("ZSEC_SAP_USER") = SAP_USER
+            envP("ZSEC_SAP_PASSWORD") = SAP_PASSWORD
+        Else
+            WScript.Echo "SSO mode: no user / password requested (logon entry: " & SAP_LOGON_ENTRY & ")"
+        End If
+
+        ' Optional user statistics (prompted once, executed by the first worker)
+        envP("ZSEC_STATS") = ""
+        statsFile = ""
+        WScript.StdOut.Write "Step 1 - Do you also want to extract user statistics? (y/n): "
+        answer = LCase(Trim(WScript.StdIn.ReadLine))
+        If answer = "y" Or answer = "yes" Then
+            Do
+                WScript.StdOut.Write "Step 2 - Period type (m=month, w=week, d=day): "
+                statsPeriod = UCase(Trim(WScript.StdIn.ReadLine))
+            Loop While statsPeriod <> "M" And statsPeriod <> "W" And statsPeriod <> "D"
+            Do
+                WScript.StdOut.Write "Step 3 - Date in YYYYMMDD format (e.g. 20260528): "
+                statsDate = Trim(WScript.StdIn.ReadLine)
+            Loop While ConvertSapDate(statsDate) = ""
+            ' The SWNC collector stores the aggregates keyed by the FIRST day of the
+            ' period: M -> 1st day of the month, W -> Monday of that week, D -> the
+            ' date itself. Snap the typed date to that key so the RFC finds the record.
+            statDateYmd = GetPeriodStart(statsPeriod, statsDate)
+            If statDateYmd <> statsDate Then
+                WScript.Echo "  -> " & statsPeriod & " aggregates are keyed by period start: using " & statDateYmd
+            End If
+            envP("ZSEC_STATS") = statsPeriod & "|" & statDateYmd
+            statsFile = StatsFileName(statsPeriod, statDateYmd)
+        End If
+        WScript.Echo ""
+
+        ' SKIP_EXISTING = False means "redo everything": delete the old exports
+        ' ONCE, here. The workers always resume (skip existing files), otherwise
+        ' every relaunch would restart from the first table.
+        If Not SKIP_EXISTING Then DeleteExistingExports statsFile
+
+        LogEvent "session start: " & SAP_SYSTEM & " client " & SAP_CLIENT & ", tables to export: " & CountPending()
+
+        runNo = 0
+        failedRuns = 0
+        everConnected = False
+        Do
+            runNo = runNo + 1
+            If runNo > MAX_LAUNCHES Then
+                WScript.Echo "Too many restarts (" & MAX_LAUNCHES & "): stopping."
                 res = EXIT_CRASH
                 Exit Do
             End If
-            WScript.Echo ""
-            If failedRuns = 0 Then
-                WScript.Echo "--- worker stopped (exit code " & code & ") after completing tables: relaunching in " & RETRY_WAIT_SEC & " s ---"
-            Else
-                WScript.Echo "--- worker stopped abnormally (exit code " & code & "): relaunching in " & RETRY_WAIT_SEC & _
-                             " s (failure " & failedRuns & " of " & MAX_FAILED_RESTARTS & " in a row) ---"
-            End If
-            WScript.Echo ""
-            WScript.Sleep RETRY_WAIT_SEC * 1000
-        End If
-    Loop
+            pendingBefore = CountPending()
+            LogEvent "launch " & runNo & " (tables still to export: " & pendingBefore & ")"
+            code = RunWorkerProcess()
+            pendingAfter = CountPending()
+            LogEvent "worker " & runNo & " ended with exit code " & code & " (tables still to export: " & pendingAfter & ")"
 
-    ' Final summary: a table with no .txt was not exported
-    WScript.Echo ""
-    PendingTables missing
-    If res = EXIT_DONE Then
-        WScript.Echo "Exporting process finished."
-    Else
-        WScript.Echo "Exporting process INTERRUPTED."
-    End If
-    If Len(missing) > 0 Then
-        WScript.Echo "Tables NOT exported: " & missing
-        WScript.Echo "(RFC error / missing authorization / table not found: see the messages above and sap-extractor.log)"
-    Else
-        WScript.Echo "All tables of tables.txt are exported."
-    End If
-    WScript.Echo "Files are in " & fso.GetAbsolutePathName(OUTPUT_FOLDER)
-    WScript.Echo "Import them into zsectools with: Import SAP Tables -> Import TXT Folder"
-    LogEvent "session end (exit " & res & ")"
+            If code = EXIT_DONE Then Exit Do
+
+            If code <> EXIT_LOGON And code <> EXIT_CONFIG Then
+                everConnected = True
+                envP("ZSEC_STATS") = ""     ' the statistics step has been attempted: never again
+            End If
+
+            If code = EXIT_CONFIG Then
+                WScript.Echo ""
+                WScript.Echo "Configuration problem: not retrying (see the message above and README.md)."
+                res = EXIT_CONFIG
+                Exit Do
+            End If
+            If code = EXIT_LOGON And Not everConnected Then
+                WScript.Echo ""
+                WScript.Echo "SAP logon failed: NOT retrying automatically (a wrong password could lock the SAP user)."
+                WScript.Echo "Check user / password / host / client / SAProuter and start again."
+                res = EXIT_LOGON
+                Exit Do
+            End If
+
+            If code = EXIT_BUDGET Then
+                failedRuns = 0
+                WScript.Echo ""
+                WScript.Echo "--- planned restart (fresh process = fresh memory), " & pendingAfter & " table(s) to go ---"
+                WScript.Echo ""
+            Else
+                If pendingAfter < pendingBefore Then
+                    failedRuns = 0
+                Else
+                    failedRuns = failedRuns + 1
+                End If
+                If failedRuns >= MAX_FAILED_RESTARTS Then
+                    WScript.Echo ""
+                    WScript.Echo "The extractor stopped abnormally " & failedRuns & " times in a row without completing any new table:"
+                    WScript.Echo "giving up. Details in sap-extractor.log. Run the .bat again to resume."
+                    res = EXIT_CRASH
+                    Exit Do
+                End If
+                WScript.Echo ""
+                If failedRuns = 0 Then
+                    WScript.Echo "--- worker stopped (exit code " & code & ") after completing tables: relaunching in " & RETRY_WAIT_SEC & " s ---"
+                Else
+                    WScript.Echo "--- worker stopped abnormally (exit code " & code & "): relaunching in " & RETRY_WAIT_SEC & _
+                                 " s (failure " & failedRuns & " of " & MAX_FAILED_RESTARTS & " in a row) ---"
+                End If
+                WScript.Echo ""
+                WScript.Sleep RETRY_WAIT_SEC * 1000
+            End If
+        Loop
+
+        ' Final summary: a table with no .txt was not exported
+        WScript.Echo ""
+        PendingTables missing
+        If res = EXIT_DONE Then
+            WScript.Echo "Exporting process finished."
+        Else
+            WScript.Echo "Exporting process INTERRUPTED."
+        End If
+        If Len(missing) > 0 Then
+            WScript.Echo "Tables NOT exported: " & missing
+            WScript.Echo "(RFC error / missing authorization / table not found: see the messages above and sap-extractor.log)"
+        Else
+            WScript.Echo "All tables of tables.txt are exported."
+        End If
+        WScript.Echo "Files are in " & fso.GetAbsolutePathName(OUTPUT_FOLDER)
+        WScript.Echo "Import them into zsectools with: Import SAP Tables -> Import TXT Folder"
+        LogEvent "session end (exit " & res & ")"
+
+        ' Prompt restart process
+        WScript.Echo ""
+        WScript.StdOut.Write "Do you want to restart the extraction process? (y/n): "
+        restartAnswer = LCase(Trim(WScript.StdIn.ReadLine))
+        WScript.Echo ""
+
+    Loop While restartAnswer = "y" Or restartAnswer = "yes"
+
     RunSupervisor = res
 End Function
 
